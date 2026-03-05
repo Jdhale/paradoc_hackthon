@@ -24,13 +24,13 @@ function LoginScreen() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const handleLogin = async () => {
-    setLoading(true);
-    setError("");
-    const res = await login(email, password);
-    if (!res.success) setError(res.error);
-    setLoading(false);
-  };
+const handleLogin = async () => {
+  setLoading(true);
+  setError("");
+  const res = await login(); // No arguments needed now
+  if (!res.success) setError(res.error);
+  setLoading(false);
+};
 
   return (
     <div style={{
@@ -113,7 +113,7 @@ function LoginScreen() {
             onMouseEnter={(e) => !loading && (e.currentTarget.style.background = "rgba(0,245,196,0.2)")}
             onMouseLeave={(e) => !loading && (e.currentTarget.style.background = "rgba(0,245,196,0.12)")}
           >
-            {loading ? "AUTHENTICATING..." : "ACCESS SYSTEM"}
+            {loading ? "AUTHENTICATING..." : "SIGN IN WITH GOOGLE"}
           </button>
         </div>
 

@@ -1,50 +1,51 @@
 import { createContext, useContext, useState, useEffect } from "react";
+import { signInWithPopup, signOut, onAuthStateChanged } from "firebase/auth";
+import { auth, provider } from "../services/firebase";
 
 const AuthContext = createContext(null);
 
-export const useAuth = () => {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
-};
+export const useAuth = () => useContext(AuthContext);
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const stored = localStorage.getItem("sentinel_user");
-    if (stored) {
-      try { setUser(JSON.parse(stored)); } catch {}
-    }
-    setLoading(false);
+    // Listen for Firebase auth state changes
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        // Here we map the user to your app's roles
+        // You can check email domains or Firestore document flags later
+        const role = firebaseUser.email.includes("admin") ? "Admin" : "Client";
+        
+        setUser({
+          id: firebaseUser.uid,
+          email: firebaseUser.email,
+          name: firebaseUser.displayName,
+          role: role,
+          avatar: firebaseUser.displayName?.[0] || "U",
+        });
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    });
+    return unsubscribe;
   }, []);
 
-  const login = async (email, password) => {
-    // Mock auth — replace with real API call
-    if (email && password) {
-      const userData = {
-        id: "u_001",
-        email,
-        name: email.split("@")[0],
-        role: email.includes("admin") ? "Admin" : "Analyst",
-        avatar: email[0].toUpperCase(),
-        token: "mock_jwt_" + Date.now(),
-      };
-      setUser(userData);
-      localStorage.setItem("sentinel_user", JSON.stringify(userData));
+  const login = async () => {
+    try {
+      await signInWithPopup(auth, provider);
       return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
-    return { success: false, error: "Invalid credentials" };
   };
 
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem("sentinel_user");
-  };
+  const logout = () => signOut(auth);
 
   const hasRole = (role) => {
-    const hierarchy = { Viewer: 0, Analyst: 1, Admin: 2 };
+    const hierarchy = { Client: 1, Admin: 2 };
     return hierarchy[user?.role] >= hierarchy[role];
   };
 

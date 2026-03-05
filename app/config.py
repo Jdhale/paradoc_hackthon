@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     TOKEN_TTL_MINUTES:  int = 1440   # 24 hours
 
     # Anthropic Claude API
-    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = "AIzaSyClI95Lr6UQP_ccIedCBbTKqJ-cm-Prn2g"
 
     # CORS
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:3000"

@@ -9,7 +9,12 @@ from sqlalchemy import Column, String, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from pydantic import BaseModel, EmailStr, Field
 from app.database import Base
+from enum import Enum
 
+class UserRole(str, Enum):
+    admin = "admin"
+    analyst = "analyst"
+    user = "user"
 
 # ORM Table
 class User(Base):
@@ -48,3 +53,9 @@ class TokenResponse(BaseModel):
     access_token : str
     token_type   : str = "bearer"
     user         : UserOut
+
+class ThreatEvent(BaseModel):
+    event_type: str
+    severity: str
+    source_ip: str
+    timestamp: datetime

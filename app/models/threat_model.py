@@ -9,7 +9,7 @@ from sqlalchemy import Column, String, Float, DateTime, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from pydantic import BaseModel
 from app.database import Base
-
+from enum import Enum
 
 # ORM Table
 class ThreatEvent(Base):
@@ -67,3 +67,34 @@ class ThreatActionRequest(BaseModel):
     """Body for POST /threats/{id}/action"""
     action : Literal["dismiss", "resolve", "escalate"]
     note   : Optional[str] = None
+
+class ThreatSeverity(str, Enum):
+    critical = "critical"
+    high     = "high"
+    medium   = "medium"
+    low      = "low"
+
+class ThreatStatus(str, Enum):
+    active        = "active"
+    investigating = "investigating"
+    resolved      = "resolved"
+    dismissed     = "dismissed"
+
+class AgentMode(str, Enum):
+    active   = "active"
+    learning = "learning"
+    passive  = "passive"
+
+class ThreatType(str, Enum):
+    credential_abuse  = "Credential Abuse"
+    payload_injection = "Payload Injection"
+    rate_limit_abuse  = "Rate Limit Abuse"
+    scanning          = "Scanning"
+    ddos              = "DDoS"
+    anomalous_traffic = "Anomalous Traffic"
+
+class AgentAction(str, Enum):
+    block_ip  = "BLOCK_IP"
+    alert     = "ALERT"
+    throttle  = "THROTTLE"
+    log       = "LOG"

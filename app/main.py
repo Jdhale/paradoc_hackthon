@@ -1,223 +1,153 @@
-"""
-main.py
-───────
-FastAPI application entry point.
-
-Responsibilities:
-  - Create the app with CORS, lifespan hooks
-  - Mount all routers
-  - WebSocket endpoint for real-time frontend updates
-  - Traffic-capture middleware
-  - Health check
-"""
 import asyncio
 import json
 import logging
 import time
+import os
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select
 
-from app.database import engine, Base
+from app.database import engine, Base, get_db
 from app.services.ai_agent import agent
 from app.services.traffic_monitor import monitor
-
-from app.routes.threats import router as threats_router, ip_router
-from app.routes.agent import router as agent_router
-from app.routes.reports import router as reports_router
-from app.routes.api_inventory import router as inventory_router
-from app.auth import get_current_user           # used in WS auth below
-
-import os
+from app.models.user_model import User, UserLogin, UserOut
+from app.auth import hash_password, verify_password, create_access_token
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 
+# ── Agent Background Worker (The Brain) ───────────────────────────────────────
+async def agent_decision_worker():
+    """Listens to the traffic stream and makes autonomous security decisions."""
+    try:
+        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        pubsub = r.pubsub()
+        await pubsub.subscribe("traffic_stream")
+        logger.info("🛡️  Agent Worker: Subscribed and listening for threats...")
 
-# ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    raw = json.loads(message["data"])
+                    traffic_data = raw.get("payload", raw)  # unwrap if needed
+                    if "ip" not in traffic_data:
+                        continue  # skip traffic_tick messages, only process real traffic events
+                    decision = await agent.analyze_traffic(traffic_data)
+                    # Log every analysis for visibility during testing
+                    logger.info(f"Analysis for {traffic_data['ip']}: Score {decision['risk_score']} - {decision['category']}")
+                    
+                    if decision["risk_score"] > 0.6: 
+                        logger.warning(f"🚨 ACTION REQUIRED: {decision['action']} IP {traffic_data['ip']} Reason: {decision['reasoning']}")
+                        
+                        if decision["action"] == "block":
+                            await r.sadd("blocked_ips", traffic_data["ip"])
+                            await r.expire("blocked_ips", 600) # Block for 10 mins
+                        
+                        # Notify Frontend via Agent Actions channel
+                        alert = {
+                            "type": "agent_decision",        # ← must be "type"
+                            "payload": {                      # ← must be "payload"
+                                "ip": traffic_data["ip"],
+                                **decision
+                            }
+                        }
+                        await r.publish("agent_actions", json.dumps(alert))
+                except Exception as e:
+                    logger.error(f"Processing Error: {e}")
+    except Exception as e:
+        logger.error(f"Worker Startup Error: {e}")
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create all DB tables (use Alembic migrations in production)
+    # Initialize DB
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-    # Boot services
+    
+    # Initialize Services
     await agent.connect()
     await monitor.connect()
+    
+    # Start the background brain
+    worker_task = asyncio.create_task(agent_decision_worker())
     logger.info("Sentinel AI backend started")
-
-    yield  # app is running
-
-    # Cleanup
-    if agent.redis:
-        await agent.redis.close()
+    
+    yield
+    
+    worker_task.cancel()
     logger.info("Sentinel AI backend shutting down")
 
-
-# ── App instance ──────────────────────────────────────────────────────────────
-app = FastAPI(
-    title      = "Sentinel AI — API Threat Intelligence",
-    version    = "1.0.0",
-    lifespan   = lifespan,
-)
+app = FastAPI(title="Sentinel AI", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins     = ["http://localhost:5173", "http://localhost:3000"],
-    allow_credentials = True,
-    allow_methods     = ["*"],
-    allow_headers     = ["*"],
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-
-# ── Traffic-capture middleware ────────────────────────────────────────────────
+# ── Middleware: Enhanced Interceptor ──────────────────────────────────────────
 @app.middleware("http")
-async def capture_traffic(request: Request, call_next):
-    """
-    Intercepts every request:
-      1. Records it in the traffic monitor
-      2. Checks if the IP is blocked (returns 403 immediately)
-      3. After the response, runs AI analysis in background
-    """
-    start   = time.perf_counter()
-    ip      = request.client.host if request.client else "unknown"
-
-    # Blocked IP check (Redis Set lookup — sub-millisecond)
-    blocked = False
-    try:
-        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
-        blocked = bool(await r.sismember("blocked_ips", ip))
-        await r.close()
-    except Exception:
-        pass  # Redis unavailable — fail open
-
-    if blocked:
+async def sentinel_interceptor(request: Request, call_next):
+    ip = request.client.host if request.client else "127.0.0.1"
+    
+    # Check Blacklist first
+    r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+    is_blocked = await r.sismember("blocked_ips", ip)
+    
+    if is_blocked:
         from fastapi.responses import JSONResponse
-        return JSONResponse({"detail": "Your IP is blocked"}, status_code=403)
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "Access Denied", "reason": "Sentinel AI blocked this IP for suspicious activity"}
+        )
 
+    # Capture Request
+    start_time = time.perf_counter()
     response = await call_next(request)
-    duration = time.perf_counter() - start
+    duration = time.perf_counter() - start_time
 
-    # Fire-and-forget traffic recording (non-blocking)
+    # Capture raw query string for SQLi detection
+    query_string = str(request.query_params)
+    
     asyncio.create_task(monitor.record(
-        ip       = ip,
-        endpoint = request.url.path,
-        method   = request.method,
-        status   = response.status_code,
-        duration = duration,
+        ip=ip,
+        endpoint=request.url.path,
+        method=request.method,
+        status=response.status_code,
+        duration=duration,
+        payload=query_string
     ))
-
+    
     return response
 
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health(): return {"status": "ok"}
 
-# ── Routers ───────────────────────────────────────────────────────────────────
-app.include_router(threats_router,  prefix="/api")
-app.include_router(ip_router,       prefix="/api")
-app.include_router(agent_router,    prefix="/api")
-app.include_router(reports_router,  prefix="/api")
-app.include_router(inventory_router,prefix="/api")
+@app.get("/api/inventory")
+async def inventory(): return {"items": ["server-1", "db-cluster"]}
 
-
-# ── Auth routes (inline for simplicity) ───────────────────────────────────────
-from fastapi import APIRouter
-from sqlalchemy.ext.asyncio import AsyncSession
-from app.database import get_db
-from app.models.user_model import User, UserCreate, UserLogin, TokenResponse, UserOut
-from app.auth import hash_password, verify_password, create_access_token
-from sqlalchemy import select
-
-auth_router = APIRouter(prefix="/auth", tags=["Auth"])
-
-@auth_router.post("/register", response_model=UserOut)
-async def register(body: UserCreate, db: AsyncSession = Depends(get_db)):
-    existing = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
-    if existing:
-        from fastapi import HTTPException
-        raise HTTPException(400, "Email already registered")
-    user = User(
-        email           = body.email,
-        hashed_password = hash_password(body.password),
-        name            = body.name,
-        role            = body.role,
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return user
-
-@auth_router.post("/login", response_model=TokenResponse)
-async def login(body: UserLogin, db: AsyncSession = Depends(get_db)):
-    from fastapi import HTTPException
-    user = (await db.execute(select(User).where(User.email == body.email))).scalar_one_or_none()
-    if not user or not verify_password(body.password, user.hashed_password):
-        raise HTTPException(401, "Invalid credentials")
-    token = create_access_token({"sub": str(user.id), "role": user.role})
-    return TokenResponse(access_token=token, user=UserOut.from_orm(user))
-
-@auth_router.get("/me", response_model=UserOut)
-async def me(current_user: User = Depends(get_current_user)):
-    return current_user
-
-app.include_router(auth_router, prefix="/api")
-
-
-# ── WebSocket — real-time feed ────────────────────────────────────────────────
-class ConnectionManager:
-    """Tracks active WS connections and broadcasts messages to all."""
-    def __init__(self):
-        self.active: list[WebSocket] = []
-
-    async def connect(self, ws: WebSocket):
-        await ws.accept()
-        self.active.append(ws)
-
-    def disconnect(self, ws: WebSocket):
-        self.active = [c for c in self.active if c != ws]
-
-    async def broadcast(self, msg: str):
-        dead = []
-        for conn in self.active:
-            try:
-                await conn.send_text(msg)
-            except Exception:
-                dead.append(conn)
-        for d in dead:
-            self.disconnect(d)
-
-
-ws_manager = ConnectionManager()
-
+@app.post("/api/auth/login")
+async def login(body: UserLogin):
+    return {"detail": "Invalid credentials", "status": 401}
 
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    """
-    Frontend connects here to receive live events.
-    Subscribes to two Redis Pub/Sub channels:
-      - traffic_stream  → forwarded as traffic_tick events
-      - agent_actions   → forwarded as agent_decision events
-    """
-    await ws_manager.connect(ws)
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
     r = await aioredis.from_url(REDIS_URL, decode_responses=True)
     pubsub = r.pubsub()
     await pubsub.subscribe("traffic_stream", "agent_actions")
-
     try:
         async for message in pubsub.listen():
             if message["type"] == "message":
-                await ws.send_text(message["data"])
+                await websocket.send_text(message["data"])
     except WebSocketDisconnect:
         pass
     finally:
-        ws_manager.disconnect(ws)
-        await pubsub.unsubscribe()
         await r.close()
-
-
-# ── Health check ──────────────────────────────────────────────────────────────
-@app.get("/health", tags=["Health"])
-async def health():
-    return {"status": "ok", "agent_mode": agent.mode}

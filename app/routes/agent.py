@@ -15,7 +15,7 @@ class ConfigUpdate(BaseModel):
     sensitivity_score: Optional[int]=None; block_threshold: Optional[int]=None; rate_limit: Optional[int]=None
 
 @router.get("/status")
-def agent_status(request: Request, _: User=Depends(require_role(UserRole.viewer, UserRole.analyst, UserRole.admin))):
+def agent_status(request: Request, _: User=Depends(require_role(UserRole.user, UserRole.analyst, UserRole.admin))):
     return request.app.state.agent.get_status()
 
 @router.post("/mode")
@@ -24,7 +24,7 @@ def set_mode(body: ModeUpdate, request: Request, _: User=Depends(require_role(Us
     return {"message": f"Mode set to {body.mode.value}", "mode": body.mode.value}
 
 @router.get("/decisions")
-def get_decisions(request: Request, limit: int=50, _: User=Depends(require_role(UserRole.viewer, UserRole.analyst, UserRole.admin))):
+def get_decisions(request: Request, limit: int=50, _: User=Depends(require_role(UserRole.user, UserRole.analyst, UserRole.admin))):
     if limit < 1 or limit > 500: raise HTTPException(422, "limit must be 1-500")
     return request.app.state.agent.get_recent_decisions(limit)
 

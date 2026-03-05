@@ -7,7 +7,6 @@ from app.database import get_db
 from app.auth import get_current_user, require_role
 from app.models.user_model import User, UserRole
 from app.models.threat_model import ThreatEvent, ThreatOut, ThreatSeverity, ThreatStatus
-
 router = APIRouter(tags=["Threats"])
 
 @router.get("/threats", response_model=dict)
